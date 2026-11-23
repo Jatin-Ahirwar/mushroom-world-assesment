@@ -78,6 +78,7 @@ const MAX_DISCOUNT_PERCENT = 25;
  * Reservation TTL in milliseconds (15 minutes).
  */
 const RESERVATION_TTL_MS = 15 * 60 * 1000;
+const PLATINUM_RESERVATION_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Valid product names.
@@ -98,6 +99,7 @@ module.exports = {
   EXPIRY_DISCOUNT_PERCENT,
   MAX_DISCOUNT_PERCENT,
   RESERVATION_TTL_MS,
+  PLATINUM_RESERVATION_TTL_MS,
   VALID_PRODUCTS,
   VALID_GRADES,
 };

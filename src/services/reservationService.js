@@ -6,7 +6,8 @@ const Ledger = require('../models/Ledger');
 const Idempotency = require('../models/Idempotency');
 const { allocateStock } = require('./allocationService');
 const { AppError } = require('../middleware/errorMiddleware');
-const { RESERVATION_TTL_MS } = require('../config/products');
+const { RESERVATION_TTL_MS, PLATINUM_RESERVATION_TTL_MS } = require('../config/products');
+const { getDistributorTier } = require('../config/distributors');
 
 function hashRequest(body) {
   return crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
@@ -19,6 +20,7 @@ async function createOrderReservation({
   grams,
   deliveryDate,
   allowPartial = false,
+  allowSubstitute = false,
   idempotencyKey,
   requestBody,
 }) {
@@ -44,7 +46,8 @@ async function createOrderReservation({
   try {
     await session.withTransaction(async () => {
       const orderTime = new Date();
-      const ttl = RESERVATION_TTL_MS;
+      const tier = getDistributorTier(distributorId);
+      const ttl = tier === 'platinum' ? PLATINUM_RESERVATION_TTL_MS : RESERVATION_TTL_MS;
       const reservedUntil = new Date(orderTime.getTime() + ttl);
 
       const allocation = await allocateStock({
@@ -54,6 +57,7 @@ async function createOrderReservation({
         grams,
         deliveryDate,
         allowPartial,
+        allowSubstitute,
         orderTime,
         session,
       });
@@ -89,11 +93,16 @@ async function createOrderReservation({
         orderId: order._id.toString(),
         status: order.status,
         reservedUntil: order.reservedUntil.toISOString(),
-        lines: allocation.lines.map((l) => ({
-          batchId: l.batchId.toString(),
-          grams: l.grams,
-          amountPaise: l.amountPaise,
-        })),
+        lines: allocation.lines.map((l) => {
+          const line = {
+            batchId: l.batchId.toString(),
+            grams: l.grams,
+            amountPaise: l.amountPaise,
+          };
+          if (l.grade) line.grade = l.grade;
+          if (l.isSubstituted) line.isSubstituted = true;
+          return line;
+        }),
         totalPaise: order.totalPaise,
         shortfallGrams: order.shortfallGrams,
       };
