@@ -1,34 +1,38 @@
-require("dotenv").config();
+require('dotenv').config();
 
-const express = require("express");
-const cors = require("cors");
-const helmet = require("helmet");
-const morgan = require("morgan");
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
 
-const connectDB = require("./config/database");
+const { errorMiddleware } = require('./middleware/errorMiddleware');
+const batchRoutes = require('./routes/batchRoutes');
+const orderRoutes = require('./routes/orderRoutes');
+const reconcileRoutes = require('./routes/reconcileRoutes');
 
 const app = express();
 
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
-app.use(morgan("dev"));
 
-app.get("/", (req, res) => {
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('dev'));
+}
+
+app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
-    message: "Perishable Stock API is running",
+    message: 'Perishable Stock API is running',
   });
 });
 
-const PORT = process.env.PORT || 5000;
+// API routes
+app.use('/batches', batchRoutes);
+app.use('/orders', orderRoutes);
+app.use('/reconcile', reconcileRoutes);
 
-const startServer = async () => {
-  await connectDB();
+// Centralised error handler
+app.use(errorMiddleware);
 
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-};
-
-startServer();
+module.exports = app;
