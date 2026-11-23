@@ -1,0 +1,259 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Perishable Stock & Order Allocation API",
+    "description": "Postman collection for Part B - Perishable Stock & Order Allocation Assessment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "orderId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/",
+          "host": ["{{baseUrl}}"],
+          "path": [""]
+        }
+      }
+    },
+    {
+      "name": "1. Create Batch (Oyster Grade A)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 50000,\n  \"harvestedAt\": \"2026-11-21T06:00:00+05:30\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/batches",
+          "host": ["{{baseUrl}}"],
+          "path": ["batches"]
+        }
+      }
+    },
+    {
+      "name": "2. Create Batch (Oyster Grade B)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"B\",\n  \"grams\": 30000,\n  \"harvestedAt\": \"2026-11-21T06:00:00+05:30\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/batches",
+          "host": ["{{baseUrl}}"],
+          "path": ["batches"]
+        }
+      }
+    },
+    {
+      "name": "3. Place Order (Gold Tier - 12.5 kg)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const response = pm.response.json();",
+              "if (response.orderId) {",
+              "    pm.collectionVariables.set('orderId', response.orderId);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Distributor-Id",
+            "value": "dist-gold-01"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "order-gold-key-101"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 12500,\n  \"deliveryDate\": \"2026-11-22\",\n  \"allowPartial\": false\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/orders",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders"]
+        }
+      }
+    },
+    {
+      "name": "4. Place Order - Idempotency Replay (Same Key & Body)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Distributor-Id",
+            "value": "dist-gold-01"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "order-gold-key-101"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 12500,\n  \"deliveryDate\": \"2026-11-22\",\n  \"allowPartial\": false\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/orders",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders"]
+        }
+      }
+    },
+    {
+      "name": "5. Place Order - Idempotency Reused Conflict (Expect 422)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Distributor-Id",
+            "value": "dist-gold-01"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "order-gold-key-101"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 25000,\n  \"deliveryDate\": \"2026-11-22\",\n  \"allowPartial\": false\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/orders",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders"]
+        }
+      }
+    },
+    {
+      "name": "6. Place Order - Insufficient Stock (Expect 409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Distributor-Id",
+            "value": "dist-silver-01"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "order-insufficient-001"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 999999,\n  \"deliveryDate\": \"2026-11-22\",\n  \"allowPartial\": false\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/orders",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders"]
+        }
+      }
+    },
+    {
+      "name": "7. Place Order - Partial Allocation (allowPartial true)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Distributor-Id",
+            "value": "dist-platinum-01"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "order-partial-001"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product\": \"oyster\",\n  \"grade\": \"A\",\n  \"grams\": 80000,\n  \"deliveryDate\": \"2026-11-22\",\n  \"allowPartial\": true\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/orders",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders"]
+        }
+      }
+    },
+    {
+      "name": "8. Confirm Order",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/orders/{{orderId}}/confirm",
+          "host": ["{{baseUrl}}"],
+          "path": ["orders", "{{orderId}}", "confirm"]
+        }
+      }
+    },
+    {
+      "name": "9. Reconcile Stock",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/reconcile",
+          "host": ["{{baseUrl}}"],
+          "path": ["reconcile"]
+        }
+      }
+    }
+  ]
+}
