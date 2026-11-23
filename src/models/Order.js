@@ -25,6 +25,14 @@ const orderLineSchema = new mongoose.Schema(
         message: "amountPaise must be an integer",
       },
     },
+    grade: {
+      type: String,
+      enum: ["A", "B"],
+    },
+    isSubstituted: {
+      type: Boolean,
+      default: false,
+    },
   },
   { _id: false },
 );

@@ -14,7 +14,7 @@ async function createOrder(req, res, next) {
       throw new AppError('Idempotency-Key header is required', 400, 'INVALID_INPUT');
     }
 
-    const { product, grade, grams, deliveryDate, allowPartial } = req.body;
+    const { product, grade, grams, deliveryDate, allowPartial, allowSubstitute } = req.body;
 
     if (!product || !VALID_PRODUCTS.includes(product)) {
       throw new AppError(`Invalid product: ${product}`, 400, 'INVALID_INPUT');
@@ -31,6 +31,9 @@ async function createOrder(req, res, next) {
     if (typeof allowPartial !== 'boolean') {
       throw new AppError('allowPartial must be a boolean', 400, 'INVALID_INPUT');
     }
+    if (allowSubstitute !== undefined && typeof allowSubstitute !== 'boolean') {
+      throw new AppError('allowSubstitute must be a boolean', 400, 'INVALID_INPUT');
+    }
 
     const { response, statusCode } = await createOrderReservation({
       distributorId,
@@ -39,6 +42,7 @@ async function createOrder(req, res, next) {
       grams,
       deliveryDate,
       allowPartial,
+      allowSubstitute: allowSubstitute || false,
       idempotencyKey,
       requestBody: req.body,
     });
