@@ -1,7 +1,49 @@
+const mongoose = require('mongoose');
 const Batch = require('../models/Batch');
-const { getDeliveryDateCutoff } = require('../utils/expiry');
+const Ledger = require('../models/Ledger');
+const { calculateExpiry, getDeliveryDateCutoff } = require('../utils/expiry');
 const { calculateLinePrice } = require('./pricingService');
 const { AppError } = require('../middleware/errorMiddleware');
+
+async function createBatchStock({ product, grade, grams, harvestedAt }) {
+  const expiresAt = calculateExpiry(product, harvestedAt);
+  const session = await mongoose.startSession();
+  let batch;
+
+  try {
+    await session.withTransaction(async () => {
+      const [created] = await Batch.create(
+        [{
+          product,
+          grade,
+          harvestedAt: new Date(harvestedAt),
+          expiresAt,
+          totalGrams: grams,
+          remainingGrams: grams,
+        }],
+        { session }
+      );
+      batch = created;
+
+      await Ledger.create(
+        [{ batchId: batch._id, movementType: 'ADDED', grams }],
+        { session }
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  return {
+    batchId: batch._id.toString(),
+    product: batch.product,
+    grade: batch.grade,
+    totalGrams: batch.totalGrams,
+    remainingGrams: batch.remainingGrams,
+    harvestedAt: batch.harvestedAt.toISOString(),
+    expiresAt: batch.expiresAt.toISOString(),
+  };
+}
 
 async function reserveFromBatches({ product, grade, grams, deliveryDate, orderTime, distributorId, isSubstituted, session }) {
   const cutoff = getDeliveryDateCutoff(deliveryDate);
@@ -18,51 +60,46 @@ async function reserveFromBatches({ product, grade, grams, deliveryDate, orderTi
   let needed = grams;
   const lines = [];
 
-  for (const b of batches) {
+  for (const batch of batches) {
     if (needed <= 0) break;
 
-    const take = Math.min(b.remainingGrams, needed);
-
-    const updated = await Batch.findOneAndUpdate(
-      { _id: b._id, remainingGrams: { $gte: take } },
+    let take = Math.min(batch.remainingGrams, needed);
+    let updated = await Batch.findOneAndUpdate(
+      { _id: batch._id, remainingGrams: { $gte: take } },
       { $inc: { remainingGrams: -take } },
       { session, new: true }
     );
 
     if (!updated) {
-      const fresh = await Batch.findById(b._id).session(session);
+      const fresh = await Batch.findById(batch._id).session(session);
       if (!fresh || fresh.remainingGrams <= 0) continue;
 
-      const retryTake = Math.min(fresh.remainingGrams, needed);
-      const retryUpdated = await Batch.findOneAndUpdate(
-        { _id: b._id, remainingGrams: { $gte: retryTake } },
-        { $inc: { remainingGrams: -retryTake } },
+      take = Math.min(fresh.remainingGrams, needed);
+      updated = await Batch.findOneAndUpdate(
+        { _id: batch._id, remainingGrams: { $gte: take } },
+        { $inc: { remainingGrams: -take } },
         { session, new: true }
       );
-      if (!retryUpdated) continue;
-
-      const price = calculateLinePrice({
-        product, grade: b.grade, grams: retryTake,
-        batchExpiresAt: b.expiresAt, orderTime, distributorId,
-      });
-
-      lines.push({
-        batchId: b._id, grams: retryTake, amountPaise: price.amountPaise,
-        grade: b.grade, isSubstituted,
-      });
-      needed -= retryTake;
-    } else {
-      const price = calculateLinePrice({
-        product, grade: b.grade, grams: take,
-        batchExpiresAt: b.expiresAt, orderTime, distributorId,
-      });
-
-      lines.push({
-        batchId: b._id, grams: take, amountPaise: price.amountPaise,
-        grade: b.grade, isSubstituted,
-      });
-      needed -= take;
+      if (!updated) continue;
     }
+
+    const price = calculateLinePrice({
+      product,
+      grade: batch.grade,
+      grams: take,
+      batchExpiresAt: batch.expiresAt,
+      orderTime,
+      distributorId,
+    });
+
+    lines.push({
+      batchId: batch._id,
+      grams: take,
+      amountPaise: price.amountPaise,
+      grade: batch.grade,
+      isSubstituted,
+    });
+    needed -= take;
   }
 
   return { lines, remaining: needed };
@@ -87,7 +124,6 @@ async function allocateStock({
   let lines = primary.lines;
   let needed = primary.remaining;
 
-  // Part C: if Grade A is short and substitution is allowed, fill from Grade B
   if (needed > 0 && allowSubstitute && grade === 'A') {
     const substitute = await reserveFromBatches({
       product, grade: 'B', grams: needed, deliveryDate, orderTime,
@@ -97,11 +133,7 @@ async function allocateStock({
     needed = substitute.remaining;
   }
 
-  if (needed > 0 && !allowPartial) {
-    throw new AppError('Insufficient stock', 409, 'INSUFFICIENT_STOCK');
-  }
-
-  if (lines.length === 0) {
+  if ((needed > 0 && !allowPartial) || lines.length === 0) {
     throw new AppError('Insufficient stock', 409, 'INSUFFICIENT_STOCK');
   }
 
@@ -112,6 +144,43 @@ async function allocateStock({
   return { lines, allocatedGrams, shortfallGrams, totalPaise };
 }
 
-module.exports = {
-  allocateStock,
-};
+const MOVEMENT_SIGN = { ADDED: 1, RESERVED: -1, RELEASED: 1, CONFIRMED: 0 };
+
+async function reconcileStock() {
+  const [batches, ledgerEntries] = await Promise.all([
+    Batch.find({}),
+    Ledger.find({}),
+  ]);
+
+  const expectedByBatch = {};
+  for (const entry of ledgerEntries) {
+    const id = entry.batchId.toString();
+    const sign = MOVEMENT_SIGN[entry.movementType] ?? 0;
+    expectedByBatch[id] = (expectedByBatch[id] || 0) + sign * entry.grams;
+  }
+
+  const mismatches = [];
+  for (const batch of batches) {
+    const id = batch._id.toString();
+    const expected = expectedByBatch[id] ?? 0;
+    if (expected !== batch.remainingGrams) {
+      mismatches.push({
+        batchId: id,
+        product: batch.product,
+        grade: batch.grade,
+        expectedRemainingGrams: expected,
+        actualRemainingGrams: batch.remainingGrams,
+        difference: batch.remainingGrams - expected,
+      });
+    }
+  }
+
+  return {
+    reconciled: mismatches.length === 0,
+    totalBatchesChecked: batches.length,
+    mismatchCount: mismatches.length,
+    mismatches,
+  };
+}
+
+module.exports = { createBatchStock, allocateStock, reconcileStock };
