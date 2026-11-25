@@ -13,6 +13,27 @@ function hashRequest(body) {
   return crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
 }
 
+async function expireOrderInSession(order, session) {
+  order.status = 'EXPIRED';
+  await order.save({ session });
+
+  for (const line of order.lines) {
+    await Batch.findByIdAndUpdate(
+      line.batchId,
+      { $inc: { remainingGrams: line.grams } },
+      { session }
+    );
+  }
+
+  const releaseEntries = order.lines.map((line) => ({
+    batchId: line.batchId,
+    movementType: 'RELEASED',
+    grams: line.grams,
+    orderId: order._id,
+  }));
+  await Ledger.insertMany(releaseEntries, { session });
+}
+
 async function createOrderReservation({
   distributorId,
   product,
@@ -27,11 +48,7 @@ async function createOrderReservation({
   const reqHash = hashRequest(requestBody);
 
   if (idempotencyKey) {
-    const existing = await Idempotency.findOne({
-      distributorId,
-      key: idempotencyKey,
-    });
-
+    const existing = await Idempotency.findOne({ distributorId, key: idempotencyKey });
     if (existing) {
       if (existing.requestHash !== reqHash) {
         throw new AppError('IDEMPOTENCY_KEY_REUSED', 422, 'IDEMPOTENCY_KEY_REUSED');
@@ -51,35 +68,25 @@ async function createOrderReservation({
       const reservedUntil = new Date(orderTime.getTime() + ttl);
 
       const allocation = await allocateStock({
-        distributorId,
-        product,
-        grade,
-        grams,
-        deliveryDate,
-        allowPartial,
-        allowSubstitute,
-        orderTime,
-        session,
+        distributorId, product, grade, grams, deliveryDate,
+        allowPartial, allowSubstitute, orderTime, session,
       });
 
-      const orderDocs = await Order.create(
-        [
-          {
-            distributorId,
-            product,
-            grade,
-            requestedGrams: grams,
-            allocatedGrams: allocation.allocatedGrams,
-            shortfallGrams: allocation.shortfallGrams,
-            lines: allocation.lines,
-            totalPaise: allocation.totalPaise,
-            status: 'RESERVED',
-            reservedUntil,
-          },
-        ],
+      const [order] = await Order.create(
+        [{
+          distributorId,
+          product,
+          grade,
+          requestedGrams: grams,
+          allocatedGrams: allocation.allocatedGrams,
+          shortfallGrams: allocation.shortfallGrams,
+          lines: allocation.lines,
+          totalPaise: allocation.totalPaise,
+          status: 'RESERVED',
+          reservedUntil,
+        }],
         { session }
       );
-      const order = orderDocs[0];
 
       const ledgerEntries = allocation.lines.map((line) => ({
         batchId: line.batchId,
@@ -94,11 +101,7 @@ async function createOrderReservation({
         status: order.status,
         reservedUntil: order.reservedUntil.toISOString(),
         lines: allocation.lines.map((l) => {
-          const line = {
-            batchId: l.batchId.toString(),
-            grams: l.grams,
-            amountPaise: l.amountPaise,
-          };
+          const line = { batchId: l.batchId.toString(), grams: l.grams, amountPaise: l.amountPaise };
           if (l.grade) line.grade = l.grade;
           if (l.isSubstituted) line.isSubstituted = true;
           return line;
@@ -109,14 +112,7 @@ async function createOrderReservation({
 
       if (idempotencyKey) {
         await Idempotency.create(
-          [
-            {
-              distributorId,
-              key: idempotencyKey,
-              requestHash: reqHash,
-              response: result,
-            },
-          ],
+          [{ distributorId, key: idempotencyKey, requestHash: reqHash, response: result }],
           { session }
         );
       }
@@ -134,9 +130,10 @@ async function confirmOrderReservation(orderId) {
   }
 
   const session = await mongoose.startSession();
+  let expiredDuringConfirm = false;
+  let response;
 
   try {
-    let response;
     await session.withTransaction(async () => {
       const order = await Order.findById(orderId).session(session);
       if (!order) {
@@ -144,39 +141,19 @@ async function confirmOrderReservation(orderId) {
       }
 
       if (order.status === 'EXPIRED') {
-        throw new AppError('RESERVATION_EXPIRED', 410, 'RESERVATION_EXPIRED');
-      }
-
-      if (order.status === 'CONFIRMED') {
-        response = {
-          orderId: order._id.toString(),
-          status: 'CONFIRMED',
-          message: 'Order already confirmed',
-        };
+        expiredDuringConfirm = true;
         return;
       }
 
-      if (order.status === 'RESERVED' && order.reservedUntil.getTime() <= Date.now()) {
-        order.status = 'EXPIRED';
-        await order.save({ session });
+      if (order.status === 'CONFIRMED') {
+        response = { orderId: order._id.toString(), status: 'CONFIRMED' };
+        return;
+      }
 
-        for (const line of order.lines) {
-          await Batch.findByIdAndUpdate(
-            line.batchId,
-            { $inc: { remainingGrams: line.grams } },
-            { session }
-          );
-        }
-
-        const releaseEntries = order.lines.map((line) => ({
-          batchId: line.batchId,
-          movementType: 'RELEASED',
-          grams: line.grams,
-          orderId: order._id,
-        }));
-        await Ledger.insertMany(releaseEntries, { session });
-
-        throw new AppError('RESERVATION_EXPIRED', 410, 'RESERVATION_EXPIRED');
+      if (order.reservedUntil.getTime() <= Date.now()) {
+        await expireOrderInSession(order, session);
+        expiredDuringConfirm = true;
+        return;
       }
 
       order.status = 'CONFIRMED';
@@ -190,11 +167,12 @@ async function confirmOrderReservation(orderId) {
       }));
       await Ledger.insertMany(confirmEntries, { session });
 
-      response = {
-        orderId: order._id.toString(),
-        status: 'CONFIRMED',
-      };
+      response = { orderId: order._id.toString(), status: 'CONFIRMED' };
     });
+
+    if (expiredDuringConfirm) {
+      throw new AppError('RESERVATION_EXPIRED', 410, 'RESERVATION_EXPIRED');
+    }
 
     return response;
   } finally {
@@ -212,31 +190,9 @@ async function releaseExpiredReservations() {
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
-        const fresh = await Order.findOne({
-          _id: order._id,
-          status: 'RESERVED',
-        }).session(session);
-
+        const fresh = await Order.findOne({ _id: order._id, status: 'RESERVED' }).session(session);
         if (!fresh) return;
-
-        fresh.status = 'EXPIRED';
-        await fresh.save({ session });
-
-        for (const line of fresh.lines) {
-          await Batch.findByIdAndUpdate(
-            line.batchId,
-            { $inc: { remainingGrams: line.grams } },
-            { session }
-          );
-        }
-
-        const releaseEntries = fresh.lines.map((line) => ({
-          batchId: line.batchId,
-          movementType: 'RELEASED',
-          grams: line.grams,
-          orderId: fresh._id,
-        }));
-        await Ledger.insertMany(releaseEntries, { session });
+        await expireOrderInSession(fresh, session);
       });
     } catch (err) {
       console.error(`Failed to expire order ${order._id}:`, err.message);
@@ -252,7 +208,7 @@ function startExpirationWorker(pollMs = 15000) {
   if (expirationInterval) return;
   expirationInterval = setInterval(() => {
     releaseExpiredReservations().catch((err) => {
-      console.error('Error in expiration worker tick:', err.message);
+      console.error('Error in expiration worker:', err.message);
     });
   }, pollMs);
   if (expirationInterval.unref) {

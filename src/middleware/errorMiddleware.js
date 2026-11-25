@@ -1,30 +1,27 @@
-/**
- * Centralised error-handling middleware.
- *
- * Catches all errors thrown or passed via next(err) in controllers/services.
- * Maps known application errors to proper HTTP status codes.
- * Never exposes database errors or stack traces in production.
- */
+const { ZodError } = require('zod');
 
-function errorMiddleware(err, req, res, _next) {
-  // If response headers have already been sent, delegate to Express default
+function errorMiddleware(err, req, res, next) {
   if (res.headersSent) {
-    return _next(err);
+    return next(err);
   }
 
-  // Application errors carry a statusCode property
+  if (err instanceof ZodError || err.name === 'ZodError') {
+    const body = { error: 'INVALID_INPUT' };
+    if (process.env.NODE_ENV !== 'production') {
+      const issues = err.issues || err.errors || [];
+      body.message = issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ');
+    }
+    return res.status(400).json(body);
+  }
+
   const statusCode = err.statusCode || 500;
   const errorCode = err.errorCode || 'INTERNAL_ERROR';
-
   const body = { error: errorCode };
 
-  // Include human-readable message only in non-production environments
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production' && statusCode < 500) {
     body.message = err.message;
-    body.stack = err.stack;
   }
 
-  // Log unexpected errors
   if (statusCode >= 500) {
     console.error(`[ERROR] ${err.message}`, err.stack);
   }
@@ -32,9 +29,6 @@ function errorMiddleware(err, req, res, _next) {
   return res.status(statusCode).json(body);
 }
 
-/**
- * Factory for application errors with status code and error code.
- */
 class AppError extends Error {
   constructor(message, statusCode, errorCode) {
     super(message);
@@ -44,7 +38,4 @@ class AppError extends Error {
   }
 }
 
-module.exports = {
-  errorMiddleware,
-  AppError,
-};
+module.exports = { errorMiddleware, AppError };
